@@ -9,8 +9,8 @@ import (
 
 	"github.com/cosmos/cosmos-sdk/crypto/keyring"
 	"github.com/docker/docker/client"
-	"github.com/strangelove-ventures/interchaintest/v7/ibc"
-	"github.com/strangelove-ventures/interchaintest/v7/relayer"
+	"github.com/strangelove-ventures/interchaintest/v8/ibc"
+	"github.com/strangelove-ventures/interchaintest/v8/relayer"
 	"go.uber.org/zap"
 )
 
@@ -24,18 +24,15 @@ type CosmosRelayer struct {
 	*relayer.DockerRelayer
 }
 
-func NewCosmosRelayer(log *zap.Logger, testName string, cli *client.Client, networkID string, options ...relayer.RelayerOption) *CosmosRelayer {
-	c := commander{log: log}
-	for _, opt := range options {
-		switch o := opt.(type) {
-		case relayer.RelayerOptionExtraStartFlags:
-			c.extraStartFlags = o.Flags
-		}
-	}
+func NewCosmosRelayer(log *zap.Logger, testName string, cli *client.Client, networkID string, options ...relayer.RelayerOpt) *CosmosRelayer {
+	c := &commander{log: log}
+
 	dr, err := relayer.NewDockerRelayer(context.TODO(), log, testName, cli, networkID, c, options...)
 	if err != nil {
 		panic(err) // TODO: return
 	}
+
+	c.extraStartFlags = dr.GetExtraStartupFlags()
 
 	r := &CosmosRelayer{
 		DockerRelayer: dr,
@@ -66,7 +63,7 @@ type CosmosRelayerChainConfig struct {
 
 const (
 	DefaultContainerImage   = "ghcr.io/cosmos/relayer"
-	DefaultContainerVersion = "v2.3.1"
+	DefaultContainerVersion = "v2.5.0"
 )
 
 // Capabilities returns the set of capabilities of the Cosmos relayer.
@@ -123,10 +120,12 @@ func (commander) AddChainConfiguration(containerFilePath, homeDir string) []stri
 	}
 }
 
-func (commander) AddKey(chainID, keyName, coinType, homeDir string) []string {
+func (commander) AddKey(chainID, keyName, coinType, signingAlgorithm, homeDir string) []string {
 	return []string{
 		"rly", "keys", "add", chainID, keyName,
-		"--coin-type", fmt.Sprint(coinType), "--home", homeDir,
+		"--coin-type", fmt.Sprint(coinType),
+		"--signing-algorithm", signingAlgorithm,
+		"--home", homeDir,
 	}
 }
 
@@ -142,19 +141,37 @@ func (commander) CreateChannel(pathName string, opts ibc.CreateChannelOptions, h
 	}
 }
 
-func (commander) CreateClients(pathName string, opts ibc.CreateClientOptions, homeDir string) []string {
-	return []string{
-		"rly", "tx", "clients", pathName, "--client-tp", opts.TrustingPeriod,
-		"--home", homeDir,
+func createClientOptsHelper(opts ibc.CreateClientOptions) []string {
+	var clientOptions []string
+	if opts.TrustingPeriod != "" {
+		clientOptions = append(clientOptions, "--client-tp", opts.TrustingPeriod)
 	}
+	if opts.TrustingPeriodPercentage != 0 {
+		clientOptions = append(clientOptions, "--client-tp-percentage", fmt.Sprint(opts.TrustingPeriodPercentage))
+	}
+	if opts.MaxClockDrift != "" {
+		clientOptions = append(clientOptions, "--max-clock-drift", opts.MaxClockDrift)
+	}
+
+	return clientOptions
 }
 
-// passing a value of 0 for customeClientTrustingPeriod will use default
-func (commander) CreateClient(pathName, homeDir, customeClientTrustingPeriod string) []string {
-	return []string{
-		"rly", "tx", "client", pathName, "--client-tp", customeClientTrustingPeriod,
-		"--home", homeDir,
-	}
+func (commander) CreateClients(pathName string, opts ibc.CreateClientOptions, homeDir string) []string {
+	cmd := []string{"rly", "tx", "clients", pathName, "--home", homeDir}
+
+	clientOptions := createClientOptsHelper(opts)
+	cmd = append(cmd, clientOptions...)
+
+	return cmd
+}
+
+func (commander) CreateClient(srcChainID, dstChainID, pathName string, opts ibc.CreateClientOptions, homeDir string) []string {
+	cmd := []string{"rly", "tx", "client", srcChainID, dstChainID, pathName, "--home", homeDir}
+
+	clientOptions := createClientOptsHelper(opts)
+	cmd = append(cmd, clientOptions...)
+
+	return cmd
 }
 
 func (commander) CreateConnections(pathName string, homeDir string) []string {
@@ -214,23 +231,28 @@ func (commander) GetClients(chainID, homeDir string) []string {
 }
 
 func (commander) LinkPath(pathName, homeDir string, channelOpts ibc.CreateChannelOptions, clientOpt ibc.CreateClientOptions) []string {
-	return []string{
+	cmd := []string{
 		"rly", "tx", "link", pathName,
 		"--src-port", channelOpts.SourcePortName,
 		"--dst-port", channelOpts.DestPortName,
 		"--order", channelOpts.Order.String(),
 		"--version", channelOpts.Version,
-		"--client-tp", clientOpt.TrustingPeriod,
 		"--debug",
-
 		"--home", homeDir,
 	}
+
+	clientOptions := createClientOptsHelper(clientOpt)
+	cmd = append(cmd, clientOptions...)
+
+	return cmd
 }
 
-func (commander) RestoreKey(chainID, keyName, coinType, mnemonic, homeDir string) []string {
+func (commander) RestoreKey(chainID, keyName, coinType, signingAlgorithm, mnemonic, homeDir string) []string {
 	return []string{
 		"rly", "keys", "restore", chainID, keyName, mnemonic,
-		"--coin-type", fmt.Sprint(coinType), "--home", homeDir,
+		"--coin-type", fmt.Sprint(coinType),
+		"--signing-algorithm", signingAlgorithm,
+		"--home", homeDir,
 	}
 }
 

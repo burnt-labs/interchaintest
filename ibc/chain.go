@@ -3,8 +3,8 @@ package ibc
 import (
 	"context"
 
+	"cosmossdk.io/math"
 	"github.com/docker/docker/client"
-	//"github.com/strangelove-ventures/interchaintest/v7/ibc"
 )
 
 type Chain interface {
@@ -37,6 +37,10 @@ type Chain interface {
 	// Note that this will not return a valid value until after Start returns.
 	GetHostRPCAddress() string
 
+	// GetHostPeerAddress returns the p2p address that can be reached by processes on the host machine.
+	// Note that this will not return a valid value until after Start returns.
+	GetHostPeerAddress() string
+
 	// GetHostGRPCAddress returns the grpc address that can be reached by processes on the host machine.
 	// Note that this will not return a valid value until after Start returns.
 	GetHostGRPCAddress() string
@@ -61,19 +65,19 @@ type Chain interface {
 	SendIBCTransfer(ctx context.Context, channelID, keyName string, amount WalletAmount, options TransferOptions) (Tx, error)
 
 	// Height returns the current block height or an error if unable to get current height.
-	Height(ctx context.Context) (uint64, error)
+	Height(ctx context.Context) (int64, error)
 
 	// GetBalance fetches the current balance for a specific account address and denom.
-	GetBalance(ctx context.Context, address string, denom string) (int64, error)
+	GetBalance(ctx context.Context, address string, denom string) (math.Int, error)
 
 	// GetGasFeesInNativeDenom gets the fees in native denom for an amount of spent gas.
 	GetGasFeesInNativeDenom(gasPaid int64) int64
 
 	// Acknowledgements returns all acknowledgements in a block at height.
-	Acknowledgements(ctx context.Context, height uint64) ([]PacketAcknowledgement, error)
+	Acknowledgements(ctx context.Context, height int64) ([]PacketAcknowledgement, error)
 
 	// Timeouts returns all timeouts in a block at height.
-	Timeouts(ctx context.Context, height uint64) ([]PacketTimeout, error)
+	Timeouts(ctx context.Context, height int64) ([]PacketTimeout, error)
 
 	// BuildWallet will return a chain-specific wallet
 	// If mnemonic != "", it will restore using that mnemonic

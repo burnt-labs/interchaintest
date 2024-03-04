@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"path"
 
-	ibcexported "github.com/cosmos/ibc-go/v7/modules/core/03-connection/types"
-	types23 "github.com/cosmos/ibc-go/v7/modules/core/23-commitment/types"
+	ibcexported "github.com/cosmos/ibc-go/v8/modules/core/03-connection/types"
+	types23 "github.com/cosmos/ibc-go/v8/modules/core/23-commitment/types"
 	"github.com/misko9/go-substrate-rpc-client/v4/signature"
 	"github.com/pelletier/go-toml/v2"
-	"github.com/strangelove-ventures/interchaintest/v7/chain/polkadot"
-	"github.com/strangelove-ventures/interchaintest/v7/ibc"
+	"github.com/strangelove-ventures/interchaintest/v8/chain/polkadot"
+	"github.com/strangelove-ventures/interchaintest/v8/ibc"
 	"go.uber.org/zap"
 )
 
@@ -30,7 +30,7 @@ type pathConfiguration struct {
 
 // pathChainConfig holds all values that will be required when interacting with a path.
 type pathChainConfig struct {
-	chainID      string
+	chainID string
 }
 
 func (hyperspaceCommander) Name() string {
@@ -51,7 +51,7 @@ func (c *hyperspaceCommander) AddChainConfiguration(containerFilePath, homeDir s
 }
 
 // Hyperspace doesn't not have this functionality
-func (hyperspaceCommander) AddKey(chainID, keyName, coinType, homeDir string) []string {
+func (hyperspaceCommander) AddKey(chainID, keyName, coinType, signingAlgorithm, homeDir string) []string {
 	panic("[AddKey] Do not call me")
 }
 
@@ -70,8 +70,6 @@ func (c *hyperspaceCommander) CreateChannel(pathName string, opts ibc.CreateChan
 		configPath(homeDir, c.paths[pathName].chainB.chainID),
 		"--config-core",
 		path.Join(homeDir, "core.config"),
-		"--delay-period",
-		"0",
 		"--port-id",
 		opts.SourcePortName,
 		"--order",
@@ -96,13 +94,16 @@ func (c *hyperspaceCommander) CreateClients(pathName string, opts ibc.CreateClie
 		configPath(homeDir, c.paths[pathName].chainB.chainID),
 		"--config-core",
 		path.Join(homeDir, "core.config"),
-		"--delay-period",
-		"0",
 		"--port-id",
 		"transfer",
 		"--order",
 		"unordered",
 	}
+}
+
+// TODO: Implement if available in hyperspace relayer
+func (hyperspaceCommander) CreateClient(srcChainID, dstChainID, pathName string, opts ibc.CreateClientOptions, homeDir string) []string {
+	panic("[CreateClient] Not Implemented")
 }
 
 func (c *hyperspaceCommander) CreateConnections(pathName, homeDir string) []string {
@@ -121,11 +122,7 @@ func (c *hyperspaceCommander) CreateConnections(pathName, homeDir string) []stri
 		"--config-core",
 		path.Join(homeDir, "core.config"),
 		"--delay-period",
-		"0",
-		"--port-id",
-		"transfer",
-		"--order",
-		"unordered",
+		"1",
 	}
 }
 
@@ -201,7 +198,7 @@ func (hyperspaceCommander) LinkPath(pathName, homeDir string, channelOpts ibc.Cr
 
 // There is no hyperspace call to restore the key, so this can't return an executable.
 // HyperspaceRelayer's RestoreKey will restore the key in the chain's config file
-func (hyperspaceCommander) RestoreKey(chainID, bech32Prefix, coinType, mnemonic, homeDir string) []string {
+func (hyperspaceCommander) RestoreKey(chainID, bech32Prefix, coinType, signingAlgorithm, mnemonic, homeDir string) []string {
 	panic("[RestoreKey] Do not use me")
 }
 
@@ -225,14 +222,6 @@ func (c *hyperspaceCommander) StartRelayer(homeDir string, pathNames ...string) 
 		configPath(homeDir, c.paths[pathName].chainB.chainID),
 		"--config-core",
 		path.Join(homeDir, "core.config"),
-		"--delay-period",
-		"0",
-		"--port-id",
-		"transfer",
-		"--order",
-		"unordered",
-		"--version",
-		"ics20-1",
 	}
 }
 

@@ -10,14 +10,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/strangelove-ventures/interchaintest/v7"
-	cosmosChain "github.com/strangelove-ventures/interchaintest/v7/chain/cosmos"
-	"github.com/strangelove-ventures/interchaintest/v7/chain/cosmos/wasm"
-	"github.com/strangelove-ventures/interchaintest/v7/ibc"
-	"github.com/strangelove-ventures/interchaintest/v7/internal/dockerutil"
-	"github.com/strangelove-ventures/interchaintest/v7/relayer"
-	"github.com/strangelove-ventures/interchaintest/v7/testreporter"
-	"github.com/strangelove-ventures/interchaintest/v7/testutil"
+	"cosmossdk.io/math"
+	"github.com/strangelove-ventures/interchaintest/v8"
+	cosmosChain "github.com/strangelove-ventures/interchaintest/v8/chain/cosmos"
+	"github.com/strangelove-ventures/interchaintest/v8/chain/cosmos/wasm"
+	"github.com/strangelove-ventures/interchaintest/v8/ibc"
+	"github.com/strangelove-ventures/interchaintest/v8/internal/dockerutil"
+	"github.com/strangelove-ventures/interchaintest/v8/relayer"
+	"github.com/strangelove-ventures/interchaintest/v8/testreporter"
+	"github.com/strangelove-ventures/interchaintest/v8/testutil"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
@@ -109,7 +110,7 @@ func TestInterchainQueriesWASM(t *testing.T) {
 	r := interchaintest.NewBuiltinRelayerFactory(
 		ibc.CosmosRly,
 		logger,
-		relayer.RelayerOptionExtraStartFlags{Flags: []string{"-p", "events", "-b", "100"}},
+		relayer.StartupFlags("-p", "events", "-b", "100"),
 	).Build(t, client, network)
 
 	// Build the network; spin up the chains and configure the relayer
@@ -142,8 +143,8 @@ func TestInterchainQueriesWASM(t *testing.T) {
 	require.NoError(t, err)
 
 	// Fund user accounts so we can query balances
-	chain1UserAmt := int64(10_000_000_000)
-	chain2UserAmt := int64(99_999_999_999)
+	chain1UserAmt := math.NewInt(10_000_000_000)
+	chain2UserAmt := math.NewInt(99_999_999_999)
 	chain1User := interchaintest.GetAndFundTestUsers(t, ctx, t.Name(), chain1UserAmt, chain1)[0]
 	chain2User := interchaintest.GetAndFundTestUsers(t, ctx, t.Name(), chain2UserAmt, chain2)[0]
 
@@ -159,11 +160,11 @@ func TestInterchainQueriesWASM(t *testing.T) {
 
 	chain1UserBalInitial, err := chain1.GetBalance(ctx, chain1UserAddress, chain1.Config().Denom)
 	require.NoError(t, err)
-	require.Equal(t, chain1UserAmt, chain1UserBalInitial)
+	require.True(t, chain1UserBalInitial.Equal(chain1UserAmt))
 
 	chain2UserBalInitial, err := chain2.GetBalance(ctx, chain2UserAddress, chain2.Config().Denom)
 	require.NoError(t, err)
-	require.Equal(t, chain2UserAmt, chain2UserBalInitial)
+	require.True(t, chain2UserBalInitial.Equal(chain2UserAmt))
 
 	logger.Info("instantiating contract")
 	initMessage := "{\"default_timeout\": 1000}"
@@ -277,19 +278,9 @@ func TestInterchainQueriesWASM(t *testing.T) {
 	logger.Info("Executing msg ->", zap.String("msg", msg))
 
 	//Query the contract on chain 1. The contract makes an interchain query to chain 2 to get the chain 2 user's balance.
-	hash, err := chain1CChain.ExecuteContract(ctx, chain1User.KeyName(), contractAddr, msg)
-
+	resp, err := chain1CChain.ExecuteContract(ctx, chain1User.KeyName(), contractAddr, msg)
 	require.NoError(t, err)
-
-	// Check the results from the interchain query above.
-	cmd = []string{chain1.Config().Bin, "query", "tx", hash,
-		"--node", chain1.GetRPCAddress(),
-		"--home", chain1.HomeDir(),
-		"--chain-id", chain1.Config().ChainID,
-		"--output", "json",
-	}
-	_, _, err = chain1.Exec(ctx, cmd, nil)
-	require.NoError(t, err)
+	require.NotNil(t, resp)
 
 	// Wait a few blocks for query to be sent to counterparty.
 	err = testutil.WaitForBlocks(ctx, 5, chain1, chain2)

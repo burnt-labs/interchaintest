@@ -10,7 +10,7 @@ import (
 
 // ChainHeighter fetches the current chain block height.
 type ChainHeighter interface {
-	Height(ctx context.Context) (uint64, error)
+	Height(ctx context.Context) (int64, error)
 }
 
 // WaitForBlocks blocks until all chains reach a block height delta equal to or greater than the delta argument.
@@ -30,10 +30,24 @@ func WaitForBlocks(ctx context.Context, delta int, chains ...ChainHeighter) erro
 	return eg.Wait()
 }
 
+// WaitForBlocksUtil iterates from 0 to maxBlocks and calls fn function with the current iteration index as a parameter.
+// If fn returns nil, the loop is terminated and the function returns nil.
+// If fn returns an error and the loop has iterated over all maxBlocks without success, the error is returned.
+func WaitForBlocksUtil(maxBlocks int, fn func(i int) error) error {
+	for i := 0; i < maxBlocks; i++ {
+		if err := fn(i); err == nil {
+			break
+		} else if i == maxBlocks-1 {
+			return err
+		}
+	}
+	return nil
+}
+
 // nodesInSync returns an error if the nodes are not in sync with the chain.
 func nodesInSync(ctx context.Context, chain ChainHeighter, nodes []ChainHeighter) error {
-	var chainHeight uint64
-	nodeHeights := make([]uint64, len(nodes))
+	var chainHeight int64
+	nodeHeights := make([]int64, len(nodes))
 	eg, egCtx := errgroup.WithContext(ctx)
 	eg.Go(func() (err error) {
 		chainHeight, err = chain.Height(egCtx)
@@ -80,8 +94,8 @@ func WaitForInSync(ctx context.Context, chain ChainHeighter, nodes ...ChainHeigh
 type height struct {
 	Chain ChainHeighter
 
-	starting uint64
-	current  uint64
+	starting int64
+	current  int64
 }
 
 func (h *height) WaitForDelta(ctx context.Context, delta int) error {
@@ -107,7 +121,7 @@ func (h *height) delta() int {
 	return int(h.current - h.starting)
 }
 
-func (h *height) update(height uint64) {
+func (h *height) update(height int64) {
 	if h.starting == 0 {
 		h.starting = height
 	}

@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
-	ptypes "github.com/cosmos/ibc-go/v7/modules/core/05-port/types"
-	host "github.com/cosmos/ibc-go/v7/modules/core/24-host"
+	chantypes "github.com/cosmos/ibc-go/v8/modules/core/04-channel/types"
+	ptypes "github.com/cosmos/ibc-go/v8/modules/core/05-port/types"
+	host "github.com/cosmos/ibc-go/v8/modules/core/24-host"
 )
 
 // Relayer represents an instance of a relayer that can be support IBC.
@@ -27,7 +27,7 @@ type Relayer interface {
 	RestoreKey(ctx context.Context, rep RelayerExecReporter, cfg ChainConfig, keyName, mnemonic string) error
 
 	// generate a new key
-	AddKey(ctx context.Context, rep RelayerExecReporter, chainID, keyName, coinType string) (Wallet, error)
+	AddKey(ctx context.Context, rep RelayerExecReporter, chainID, keyName, coinType, signingAlgorithm string) (Wallet, error)
 
 	// GetWallet returns a Wallet for that relayer on the given chain and a boolean indicating if it was found.
 	GetWallet(chainID string) (Wallet, bool)
@@ -64,12 +64,23 @@ type Relayer interface {
 	// StopRelayer stops a relayer that started work through StartRelayer.
 	StopRelayer(ctx context.Context, rep RelayerExecReporter) error
 
+	// PauseRelayer halts a relayer that started work through StartRelayer.
+	PauseRelayer(ctx context.Context) error
+
+	// ResumeRelayer resumes a relayer that was paused through PauseRelayer.
+	ResumeRelayer(ctx context.Context) error
+
 	// Flush flushes any outstanding packets and then returns.
 	Flush(ctx context.Context, rep RelayerExecReporter, pathName string, channelID string) error
 
 	// CreateClients performs the client handshake steps necessary for creating a light client
 	// on src that tracks the state of dst, and a light client on dst that tracks the state of src.
 	CreateClients(ctx context.Context, rep RelayerExecReporter, pathName string, opts CreateClientOptions) error
+
+	// CreateClient performs the client handshake steps necessary for creating a light client
+	// on src that tracks the state of dst.
+	// Unlike CreateClients, this only creates the client on the destination chain
+	CreateClient(ctx context.Context, rep RelayerExecReporter, srcChainID, dstChainID, pathName string, opts CreateClientOptions) error
 
 	// CreateConnections performs the connection handshake steps necessary for creating a connection
 	// between the src and dst chains.
@@ -262,23 +273,36 @@ func (o Order) Validate() error {
 }
 
 // CreateClientOptions contains the configuration for creating a client.
+
+// a zero value is the same as not specifying the flag and will use the relayer defauls
 type CreateClientOptions struct {
-	TrustingPeriod string
+	TrustingPeriod           string
+	TrustingPeriodPercentage int64 // only available for Go Relayer
+	MaxClockDrift            string
 }
 
 // DefaultClientOpts returns the default settings for creating clients.
-// These default options are usually determined by the relayer
+
+// empty values will use the relayer defaults
 func DefaultClientOpts() CreateClientOptions {
-	return CreateClientOptions{
-		TrustingPeriod: "0",
-	}
+	return CreateClientOptions{}
 }
 
 func (opts CreateClientOptions) Validate() error {
-	_, err := time.ParseDuration(opts.TrustingPeriod)
-	if err != nil {
-		return err
+	if opts.TrustingPeriod != "" {
+		_, err := time.ParseDuration(opts.TrustingPeriod)
+		if err != nil {
+			return err
+		}
 	}
+
+	if opts.MaxClockDrift != "" {
+		_, err := time.ParseDuration(opts.MaxClockDrift)
+		if err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 

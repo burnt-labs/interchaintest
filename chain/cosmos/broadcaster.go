@@ -14,10 +14,10 @@ import (
 	"github.com/cosmos/cosmos-sdk/crypto/keyring"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/tx/signing"
-	authTx "github.com/cosmos/cosmos-sdk/x/auth/tx"
+	authtx "github.com/cosmos/cosmos-sdk/x/auth/tx"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
-	"github.com/strangelove-ventures/interchaintest/v7/internal/dockerutil"
-	"github.com/strangelove-ventures/interchaintest/v7/testutil"
+	"github.com/strangelove-ventures/interchaintest/v8/internal/dockerutil"
+	"github.com/strangelove-ventures/interchaintest/v8/testutil"
 )
 
 type ClientContextOpt func(clientContext client.Context) client.Context
@@ -79,7 +79,7 @@ func (b *Broadcaster) GetFactory(ctx context.Context, user User) (tx.Factory, er
 		return tx.Factory{}, err
 	}
 
-	sdkAdd, err := sdk.AccAddressFromBech32(user.FormattedAddress())
+	sdkAdd, err := b.chain.AccAddressFromBech32(user.FormattedAddress())
 	if err != nil {
 		return tx.Factory{}, err
 	}
@@ -114,7 +114,7 @@ func (b *Broadcaster) GetClientContext(ctx context.Context, user User) (client.C
 		b.keyrings[user] = kr
 	}
 
-	sdkAdd, err := sdk.AccAddressFromBech32(user.FormattedAddress())
+	sdkAdd, err := b.chain.AccAddressFromBech32(user.FormattedAddress())
 	if err != nil {
 		return client.Context{}, err
 	}
@@ -141,6 +141,15 @@ func (b *Broadcaster) UnmarshalTxResponseBytes(ctx context.Context, bytes []byte
 	if err := b.chain.cfg.EncodingConfig.Codec.UnmarshalJSON(bytes, &resp); err != nil {
 		return sdk.TxResponse{}, err
 	}
+
+	// persist nested errors such as ValidateBasic checks.
+	code := resp.Code
+	rawLog := resp.RawLog
+
+	if code != 0 {
+		return resp, fmt.Errorf("error in transaction (code: %d): raw_log: %s", code, rawLog)
+	}
+
 	return resp, nil
 }
 
@@ -224,16 +233,22 @@ func BroadcastTx(ctx context.Context, broadcaster *Broadcaster, broadcastingUser
 		return sdk.TxResponse{}, err
 	}
 
-	resp, err := authTx.QueryTx(cc, respWithTxHash.TxHash)
-	if err != nil {
-		// if we fail to query the tx, it means an error occurred with the original message broadcast.
-		// we should return this instead.
-		originalResp, err := broadcaster.UnmarshalTxResponseBytes(ctx, txBytes)
-		if err != nil {
-			return sdk.TxResponse{}, err
-		}
-		return originalResp, nil
-	}
+	return getFullyPopulatedResponse(cc, respWithTxHash.TxHash)
+}
 
-	return *resp, nil
+// getFullyPopulatedResponse returns a fully populated sdk.TxResponse.
+// the QueryTx function is periodically called until a tx with the given hash
+// has been included in a block.
+func getFullyPopulatedResponse(cc client.Context, txHash string) (sdk.TxResponse, error) {
+	var resp sdk.TxResponse
+	err := testutil.WaitForCondition(time.Second*60, time.Second*5, func() (bool, error) {
+		fullyPopulatedTxResp, err := authtx.QueryTx(cc, txHash)
+		if err != nil {
+			return false, nil
+		}
+
+		resp = *fullyPopulatedTxResp
+		return true, nil
+	})
+	return resp, err
 }

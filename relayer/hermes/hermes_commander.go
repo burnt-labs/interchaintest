@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/strangelove-ventures/interchaintest/v7/ibc"
-	"github.com/strangelove-ventures/interchaintest/v7/relayer"
+	"github.com/strangelove-ventures/interchaintest/v8/ibc"
+	"github.com/strangelove-ventures/interchaintest/v8/relayer"
 	"go.uber.org/zap"
 
-	ibcexported "github.com/cosmos/ibc-go/v7/modules/core/03-connection/types"
-	"github.com/cosmos/ibc-go/v7/modules/core/23-commitment/types"
+	ibcexported "github.com/cosmos/ibc-go/v8/modules/core/03-connection/types"
+	"github.com/cosmos/ibc-go/v8/modules/core/23-commitment/types"
 )
 
 var _ relayer.RelayerCommander = &commander{}
@@ -165,7 +165,7 @@ func (c commander) LinkPath(pathName, homeDir string, channelOpts ibc.CreateChan
 	panic("link path implemented in hermes relayer not the commander")
 }
 
-func (c commander) RestoreKey(chainID, keyName, coinType, mnemonic, homeDir string) []string {
+func (c commander) RestoreKey(chainID, keyName, coinType, signingAlgorithm, mnemonic, homeDir string) []string {
 	panic("restore key implemented in hermes relayer not the commander")
 }
 
@@ -173,7 +173,7 @@ func (c commander) AddChainConfiguration(containerFilePath, homeDir string) []st
 	panic("add chain configuration implemented in hermes relayer not the commander")
 }
 
-func (c commander) AddKey(chainID, keyName, coinType, homeDir string) []string {
+func (c commander) AddKey(chainID, keyName, coinType, signingAlgorithm, homeDir string) []string {
 	panic("add key implemented in hermes relayer not the commander")
 }
 
@@ -183,6 +183,10 @@ func (c commander) CreateChannel(pathName string, opts ibc.CreateChannelOptions,
 
 func (c commander) CreateClients(pathName string, opts ibc.CreateClientOptions, homeDir string) []string {
 	panic("create clients implemented in hermes relayer not the commander")
+}
+
+func (c commander) CreateClient(srcChainID, dstChainID, pathName string, opts ibc.CreateClientOptions, homeDir string) []string {
+	panic("create client implemented in hermes relayer not the commander")
 }
 
 func (c commander) CreateConnections(pathName string, homeDir string) []string {

@@ -7,12 +7,19 @@ import (
 	"strings"
 
 	"github.com/icza/dyno"
-	"github.com/strangelove-ventures/interchaintest/v7/ibc"
+	"github.com/strangelove-ventures/interchaintest/v8/ibc"
 )
 
 type GenesisKV struct {
 	Key   string      `json:"key"`
 	Value interface{} `json:"value"`
+}
+
+func NewGenesisKV(key string, value interface{}) GenesisKV {
+	return GenesisKV{
+		Key:   key,
+		Value: value,
+	}
 }
 
 func ModifyGenesis(genesisKV []GenesisKV) func(ibc.ChainConfig, []byte) ([]byte, error) {

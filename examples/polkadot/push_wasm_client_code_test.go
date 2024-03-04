@@ -6,20 +6,23 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"testing"
 
+	"cosmossdk.io/math"
+	govv1beta1 "github.com/cosmos/cosmos-sdk/x/gov/types/v1beta1"
 	"github.com/icza/dyno"
-	"github.com/strangelove-ventures/interchaintest/v7"
-	"github.com/strangelove-ventures/interchaintest/v7/chain/cosmos"
-	"github.com/strangelove-ventures/interchaintest/v7/ibc"
-	"github.com/strangelove-ventures/interchaintest/v7/testreporter"
-	"github.com/strangelove-ventures/interchaintest/v7/testutil"
+	"github.com/strangelove-ventures/interchaintest/v8"
+	"github.com/strangelove-ventures/interchaintest/v8/chain/cosmos"
+	"github.com/strangelove-ventures/interchaintest/v8/ibc"
+	"github.com/strangelove-ventures/interchaintest/v8/testreporter"
+	"github.com/strangelove-ventures/interchaintest/v8/testutil"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 )
 
 const (
-	heightDelta      = uint64(20)
+	heightDelta      = 20
 	votingPeriod     = "30s"
 	maxDepositPeriod = "10s"
 )
@@ -108,13 +111,13 @@ func TestPushWasmClientCode(t *testing.T) {
 	})
 
 	// Create and Fund User Wallets
-	fundAmount := int64(10_000_000_000)
-	users := interchaintest.GetAndFundTestUsers(t, ctx, "default", int64(fundAmount), simd)
+	fundAmount := math.NewInt(10_000_000_000)
+	users := interchaintest.GetAndFundTestUsers(t, ctx, "default", fundAmount, simd)
 	simd1User := users[0]
 
 	simd1UserBalInitial, err := simd.GetBalance(ctx, simd1User.FormattedAddress(), simd.Config().Denom)
 	require.NoError(t, err)
-	require.Equal(t, fundAmount, simd1UserBalInitial)
+	require.True(t, simd1UserBalInitial.Equal(fundAmount))
 
 	simdChain := simd.(*cosmos.CosmosChain)
 
@@ -138,7 +141,10 @@ func TestPushWasmClientCode(t *testing.T) {
 	err = simdChain.VoteOnProposalAllValidators(ctx, proposalTx.ProposalID, cosmos.ProposalVoteYes)
 	require.NoError(t, err, "failed to submit votes")
 
-	_, err = cosmos.PollForProposalStatus(ctx, simdChain, height, height+heightDelta, proposalTx.ProposalID, cosmos.ProposalStatusPassed)
+	propId, err := strconv.ParseUint(proposalTx.ProposalID, 10, 64)
+	require.NoError(t, err, "failed to convert proposal ID to uint64")
+
+	_, err = cosmos.PollForProposalStatus(ctx, simdChain, height, height+heightDelta, propId, govv1beta1.StatusPassed)
 	require.NoError(t, err, "proposal status did not change to passed in expected number of blocks")
 
 	err = testutil.WaitForBlocks(ctx, 2, simd)
