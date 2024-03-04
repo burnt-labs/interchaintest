@@ -7,10 +7,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/strangelove-ventures/interchaintest/v7/chain/cosmos"
-	"github.com/strangelove-ventures/interchaintest/v7/chain/penumbra"
-	"github.com/strangelove-ventures/interchaintest/v7/chain/polkadot"
-	"github.com/strangelove-ventures/interchaintest/v7/ibc"
+	"github.com/strangelove-ventures/interchaintest/v8/chain/cosmos"
+	"github.com/strangelove-ventures/interchaintest/v8/chain/ethereum"
+	"github.com/strangelove-ventures/interchaintest/v8/chain/penumbra"
+	"github.com/strangelove-ventures/interchaintest/v8/chain/polkadot"
+	"github.com/strangelove-ventures/interchaintest/v8/ibc"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -153,6 +154,8 @@ func buildChain(log *zap.Logger, testName string, cfg ibc.ChainConfig, numValida
 		default:
 			return nil, fmt.Errorf("unexpected error, unknown polkadot parachain: %s", cfg.Name)
 		}
+	case "ethereum":
+		return ethereum.NewEthereumChain(testName, cfg, log), nil
 	default:
 		return nil, fmt.Errorf("unexpected error, unknown chain type: %s for chain: %s", cfg.Type, cfg.Name)
 	}

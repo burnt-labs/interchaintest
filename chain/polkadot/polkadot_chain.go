@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 
+	"cosmossdk.io/math"
 	"github.com/99designs/keyring"
 	"github.com/StirlingMarketingGroup/go-namecase"
 	sdktypes "github.com/cosmos/cosmos-sdk/types"
@@ -21,9 +22,9 @@ import (
 	p2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/misko9/go-substrate-rpc-client/v4/signature"
 	gstypes "github.com/misko9/go-substrate-rpc-client/v4/types"
-	"github.com/strangelove-ventures/interchaintest/v7/ibc"
-	"github.com/strangelove-ventures/interchaintest/v7/internal/blockdb"
-	"github.com/strangelove-ventures/interchaintest/v7/internal/dockerutil"
+	"github.com/strangelove-ventures/interchaintest/v8/ibc"
+	"github.com/strangelove-ventures/interchaintest/v8/internal/blockdb"
+	"github.com/strangelove-ventures/interchaintest/v8/internal/dockerutil"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -340,7 +341,7 @@ func (c *PolkadotChain) modifyRelayChainGenesis(ctx context.Context, chainSpec i
 	}
 	for _, wallet := range additionalGenesisWallets {
 		balances = append(balances,
-			[]interface{}{wallet.Address, wallet.Amount * polkadotScaling},
+			[]interface{}{wallet.Address, wallet.Amount.MulRaw(polkadotScaling).Uint64()},
 		)
 	}
 
@@ -561,6 +562,11 @@ func (c *PolkadotChain) GetGRPCAddress() string {
 	return fmt.Sprintf("%s:%s", c.RelayChainNodes[0].HostName(), strings.Split(wsPort, "/")[0])
 }
 
+// Implements Chain interface
+func (c *PolkadotChain) GetHostPeerAddress() string {
+	panic("NOT IMPLEMENTED")
+}
+
 // GetHostRPCAddress returns the rpc address that can be reached by processes on the host machine.
 // Note that this will not return a valid value until after Start returns.
 // Implements Chain interface.
@@ -583,19 +589,19 @@ func (c *PolkadotChain) GetHostGRPCAddress() string {
 
 // Height returns the current block height or an error if unable to get current height.
 // Implements Chain interface.
-func (c *PolkadotChain) Height(ctx context.Context) (uint64, error) {
+func (c *PolkadotChain) Height(ctx context.Context) (int64, error) {
 	if len(c.ParachainNodes) > 0 && len(c.ParachainNodes[0]) > 0 {
 		block, err := c.ParachainNodes[0][0].api.RPC.Chain.GetBlockLatest()
 		if err != nil {
 			return 0, err
 		}
-		return uint64(block.Block.Header.Number), nil
+		return int64(block.Block.Header.Number), nil
 	}
 	block, err := c.RelayChainNodes[0].api.RPC.Chain.GetBlockLatest()
 	if err != nil {
 		return 0, err
 	}
-	return uint64(block.Block.Header.Number), nil
+	return int64(block.Block.Header.Number), nil
 }
 
 // ExportState exports the chain state at specific height.
@@ -778,7 +784,7 @@ func (c *PolkadotChain) SendIBCTransfer(
 
 // GetBalance fetches the current balance for a specific account address and denom.
 // Implements Chain interface.
-func (c *PolkadotChain) GetBalance(ctx context.Context, address string, denom string) (int64, error) {
+func (c *PolkadotChain) GetBalance(ctx context.Context, address string, denom string) (math.Int, error) {
 	// If denom == polkadot denom, it is a relay chain query, else parachain query
 	if denom == c.cfg.Denom {
 		return c.RelayChainNodes[0].GetBalance(ctx, address, denom)
@@ -809,13 +815,13 @@ func (c *PolkadotChain) GetGasFeesInNativeDenom(gasPaid int64) int64 {
 
 // Acknowledgements returns all acknowledgements in a block at height.
 // Implements Chain interface.
-func (c *PolkadotChain) Acknowledgements(ctx context.Context, height uint64) ([]ibc.PacketAcknowledgement, error) {
+func (c *PolkadotChain) Acknowledgements(ctx context.Context, height int64) ([]ibc.PacketAcknowledgement, error) {
 	panic("[Acknowledgements] not implemented yet")
 }
 
 // Timeouts returns all timeouts in a block at height.
 // Implements Chain interface.
-func (c *PolkadotChain) Timeouts(ctx context.Context, height uint64) ([]ibc.PacketTimeout, error) {
+func (c *PolkadotChain) Timeouts(ctx context.Context, height int64) ([]ibc.PacketTimeout, error) {
 	panic("[Timeouts] not implemented yet")
 }
 
@@ -836,7 +842,7 @@ func (c *PolkadotChain) GetKeyringPair(keyName string) (signature.KeyringPair, e
 }
 
 // FindTxs implements blockdb.BlockSaver (Not implemented yet for polkadot, but we don't want to exit)
-func (c *PolkadotChain) FindTxs(ctx context.Context, height uint64) ([]blockdb.Tx, error) {
+func (c *PolkadotChain) FindTxs(ctx context.Context, height int64) ([]blockdb.Tx, error) {
 	return []blockdb.Tx{}, nil
 }
 

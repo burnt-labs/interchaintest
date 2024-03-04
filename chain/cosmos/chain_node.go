@@ -10,7 +10,6 @@ import (
 	"hash/fnv"
 	"os"
 	"path"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,18 +24,21 @@ import (
 	libclient "github.com/cometbft/cometbft/rpc/jsonrpc/client"
 	"github.com/cosmos/cosmos-sdk/client"
 	"github.com/cosmos/cosmos-sdk/crypto/keyring"
-	"github.com/cosmos/cosmos-sdk/types"
+	sdk "github.com/cosmos/cosmos-sdk/types"
 	authTx "github.com/cosmos/cosmos-sdk/x/auth/tx"
-	paramsutils "github.com/cosmos/cosmos-sdk/x/params/client/utils"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
+	volumetypes "github.com/docker/docker/api/types/volume"
 	dockerclient "github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
-	"github.com/strangelove-ventures/interchaintest/v7/ibc"
-	"github.com/strangelove-ventures/interchaintest/v7/internal/blockdb"
-	"github.com/strangelove-ventures/interchaintest/v7/internal/dockerutil"
-	"github.com/strangelove-ventures/interchaintest/v7/testutil"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/strangelove-ventures/interchaintest/v8/ibc"
+	"github.com/strangelove-ventures/interchaintest/v8/internal/blockdb"
+	"github.com/strangelove-ventures/interchaintest/v8/internal/dockerutil"
+	"github.com/strangelove-ventures/interchaintest/v8/testutil"
 )
 
 // ChainNode represents a node in the test network that is being created
@@ -48,8 +50,12 @@ type ChainNode struct {
 	NetworkID    string
 	DockerClient *dockerclient.Client
 	Client       rpcclient.Client
+	GrpcConn     *grpc.ClientConn
 	TestName     string
 	Image        ibc.DockerImage
+
+	// Additional processes that need to be run on a per-validator basis.
+	Sidecars SidecarProcesses
 
 	lock sync.Mutex
 	log  *zap.Logger
@@ -58,7 +64,9 @@ type ChainNode struct {
 
 	// Ports set during StartContainer.
 	hostRPCPort  string
+	hostAPIPort  string
 	hostGRPCPort string
+	hostP2PPort  string
 }
 
 func NewChainNode(log *zap.Logger, validator bool, chain *CosmosChain, dockerClient *dockerclient.Client, networkID string, testName string, image ibc.DockerImage, index int) *ChainNode {
@@ -94,7 +102,7 @@ const (
 )
 
 var (
-	sentryPorts = nat.PortSet{
+	sentryPorts = nat.PortMap{
 		nat.Port(p2pPort):     {},
 		nat.Port(rpcPort):     {},
 		nat.Port(grpcPort):    {},
@@ -117,6 +125,58 @@ func (tn *ChainNode) NewClient(addr string) error {
 	}
 
 	tn.Client = rpcClient
+
+	grpcConn, err := grpc.Dial(
+		tn.hostGRPCPort, grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		return fmt.Errorf("grpc dial: %w", err)
+	}
+	tn.GrpcConn = grpcConn
+
+	return nil
+}
+
+func (tn *ChainNode) NewSidecarProcess(
+	ctx context.Context,
+	preStart bool,
+	processName string,
+	cli *dockerclient.Client,
+	networkID string,
+	image ibc.DockerImage,
+	homeDir string,
+	ports []string,
+	startCmd []string,
+	env []string,
+) error {
+	s := NewSidecar(tn.log, true, preStart, tn.Chain, cli, networkID, processName, tn.TestName, image, homeDir, tn.Index, ports, startCmd, env)
+
+	v, err := cli.VolumeCreate(ctx, volumetypes.CreateOptions{
+		Labels: map[string]string{
+			dockerutil.CleanupLabel:   tn.TestName,
+			dockerutil.NodeOwnerLabel: s.Name(),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("creating volume for sidecar process: %w", err)
+	}
+	s.VolumeName = v.Name
+
+	if err := dockerutil.SetVolumeOwner(ctx, dockerutil.VolumeOwnerOptions{
+		Log: tn.log,
+
+		Client: cli,
+
+		VolumeName: v.Name,
+		ImageRef:   image.Ref(),
+		TestName:   tn.TestName,
+		UidGid:     image.UidGid,
+	}); err != nil {
+		return fmt.Errorf("set volume owner: %w", err)
+	}
+
+	tn.Sidecars = append(tn.Sidecars, s)
+
 	return nil
 }
 
@@ -125,6 +185,7 @@ func (tn *ChainNode) CliContext() client.Context {
 	cfg := tn.Chain.Config()
 	return client.Context{
 		Client:            tn.Client,
+		GRPCClient:        tn.GrpcConn,
 		ChainID:           cfg.ChainID,
 		InterfaceRegistry: cfg.EncodingConfig.InterfaceRegistry,
 		Input:             os.Stdin,
@@ -144,6 +205,10 @@ func (tn *ChainNode) Name() string {
 		nodeType = "fn"
 	}
 	return fmt.Sprintf("%s-%s-%d-%s", tn.Chain.Config().ChainID, nodeType, tn.Index, dockerutil.SanitizeContainerName(tn.TestName))
+}
+
+func (tn *ChainNode) ContainerID() string {
+	return tn.containerLifecycle.ContainerID()
 }
 
 // hostname of the test node container
@@ -237,6 +302,7 @@ func (tn *ChainNode) SetTestConfig(ctx context.Context) error {
 
 	// Enable public RPC
 	rpc["laddr"] = "tcp://0.0.0.0:26657"
+	rpc["allowed_origins"] = []string{"*"}
 
 	c["rpc"] = rpc
 
@@ -261,6 +327,15 @@ func (tn *ChainNode) SetTestConfig(ctx context.Context) error {
 	grpc["address"] = "0.0.0.0:9090"
 
 	a["grpc"] = grpc
+
+	api := make(testutil.Toml)
+
+	// Enable public REST API
+	api["enable"] = true
+	api["swagger"] = true
+	api["address"] = "tcp://0.0.0.0:1317"
+
+	a["api"] = api
 
 	return testutil.ModifyTomlConfigFile(
 		ctx,
@@ -293,17 +368,17 @@ func (tn *ChainNode) SetPeers(ctx context.Context, peers string) error {
 	)
 }
 
-func (tn *ChainNode) Height(ctx context.Context) (uint64, error) {
+func (tn *ChainNode) Height(ctx context.Context) (int64, error) {
 	res, err := tn.Client.Status(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("tendermint rpc client status: %w", err)
 	}
 	height := res.SyncInfo.LatestBlockHeight
-	return uint64(height), nil
+	return height, nil
 }
 
 // FindTxs implements blockdb.BlockSaver.
-func (tn *ChainNode) FindTxs(ctx context.Context, height uint64) ([]blockdb.Tx, error) {
+func (tn *ChainNode) FindTxs(ctx context.Context, height int64) ([]blockdb.Tx, error) {
 	h := int64(height)
 	var eg errgroup.Group
 	var blockRes *coretypes.ResultBlockResults
@@ -327,12 +402,12 @@ func (tn *ChainNode) FindTxs(ctx context.Context, height uint64) ([]blockdb.Tx, 
 
 		sdkTx, err := decodeTX(interfaceRegistry, tx)
 		if err != nil {
-			tn.logger().Info("Failed to decode tx", zap.Uint64("height", height), zap.Error(err))
+			tn.logger().Info("Failed to decode tx", zap.Int64("height", height), zap.Error(err))
 			continue
 		}
 		b, err := encodeTxToJSON(interfaceRegistry, sdkTx)
 		if err != nil {
-			tn.logger().Info("Failed to marshal tx to json", zap.Uint64("height", height), zap.Error(err))
+			tn.logger().Info("Failed to marshal tx to json", zap.Int64("height", height), zap.Error(err))
 			continue
 		}
 		newTx.Data = b
@@ -355,12 +430,12 @@ func (tn *ChainNode) FindTxs(ctx context.Context, height uint64) ([]blockdb.Tx, 
 		}
 		txs = append(txs, newTx)
 	}
-	if len(blockRes.BeginBlockEvents) > 0 {
-		beginBlockTx := blockdb.Tx{
-			Data: []byte(`{"data":"begin_block","note":"this is a transaction artificially created for debugging purposes"}`),
+	if len(blockRes.FinalizeBlockEvents) > 0 {
+		finalizeBlockTx := blockdb.Tx{
+			Data: []byte(`{"data":"finalize_block","note":"this is a transaction artificially created for debugging purposes"}`),
 		}
-		beginBlockTx.Events = make([]blockdb.Event, len(blockRes.BeginBlockEvents))
-		for i, e := range blockRes.BeginBlockEvents {
+		finalizeBlockTx.Events = make([]blockdb.Event, len(blockRes.FinalizeBlockEvents))
+		for i, e := range blockRes.FinalizeBlockEvents {
 			attrs := make([]blockdb.EventAttribute, len(e.Attributes))
 			for j, attr := range e.Attributes {
 				attrs[j] = blockdb.EventAttribute{
@@ -368,34 +443,13 @@ func (tn *ChainNode) FindTxs(ctx context.Context, height uint64) ([]blockdb.Tx, 
 					Value: string(attr.Value),
 				}
 			}
-			beginBlockTx.Events[i] = blockdb.Event{
+			finalizeBlockTx.Events[i] = blockdb.Event{
 				Type:       e.Type,
 				Attributes: attrs,
 			}
 		}
-		txs = append(txs, beginBlockTx)
+		txs = append(txs, finalizeBlockTx)
 	}
-	if len(blockRes.EndBlockEvents) > 0 {
-		endBlockTx := blockdb.Tx{
-			Data: []byte(`{"data":"end_block","note":"this is a transaction artificially created for debugging purposes"}`),
-		}
-		endBlockTx.Events = make([]blockdb.Event, len(blockRes.EndBlockEvents))
-		for i, e := range blockRes.EndBlockEvents {
-			attrs := make([]blockdb.EventAttribute, len(e.Attributes))
-			for j, attr := range e.Attributes {
-				attrs[j] = blockdb.EventAttribute{
-					Key:   string(attr.Key),
-					Value: string(attr.Value),
-				}
-			}
-			endBlockTx.Events[i] = blockdb.Event{
-				Type:       e.Type,
-				Attributes: attrs,
-			}
-		}
-		txs = append(txs, endBlockTx)
-	}
-
 	return txs, nil
 }
 
@@ -403,7 +457,7 @@ func (tn *ChainNode) FindTxs(ctx context.Context, height uint64) ([]blockdb.Tx, 
 // with the chain node binary.
 func (tn *ChainNode) TxCommand(keyName string, command ...string) []string {
 	command = append([]string{"tx"}, command...)
-	var gasPriceFound, gasAdjustmentFound = false, false
+	var gasPriceFound, gasAdjustmentFound, feesFound = false, false, false
 	for i := 0; i < len(command); i++ {
 		if command[i] == "--gas-prices" {
 			gasPriceFound = true
@@ -411,12 +465,15 @@ func (tn *ChainNode) TxCommand(keyName string, command ...string) []string {
 		if command[i] == "--gas-adjustment" {
 			gasAdjustmentFound = true
 		}
+		if command[i] == "--fees" {
+			feesFound = true
+		}
 	}
-	if !gasPriceFound {
+	if !gasPriceFound && !feesFound {
 		command = append(command, "--gas-prices", tn.Chain.Config().GasPrices)
 	}
 	if !gasAdjustmentFound {
-		command = append(command, "--gas-adjustment", fmt.Sprint(tn.Chain.Config().GasAdjustment))
+		command = append(command, "--gas-adjustment", strconv.FormatFloat(tn.Chain.Config().GasAdjustment, 'f', -1, 64))
 	}
 	return tn.NodeCommand(append(command,
 		"--from", keyName,
@@ -448,6 +505,20 @@ func (tn *ChainNode) ExecTx(ctx context.Context, keyName string, command ...stri
 		return "", err
 	}
 	return output.TxHash, nil
+}
+
+// TxHashToResponse returns the sdk transaction response struct for a given transaction hash.
+func (tn *ChainNode) TxHashToResponse(ctx context.Context, txHash string) (*sdk.TxResponse, error) {
+	stdout, stderr, err := tn.ExecQuery(ctx, "tx", txHash)
+	if err != nil {
+		fmt.Println("TxHashToResponse err: ", err.Error()+" "+string(stderr))
+	}
+
+	i := &sdk.TxResponse{}
+
+	// ignore the error since some types do not unmarshal (ex: height of int64 vs string)
+	_ = json.Unmarshal(stdout, &i)
+	return i, nil
 }
 
 // NodeCommand is a helper to retrieve a full command for a chain node binary.
@@ -596,14 +667,21 @@ func (tn *ChainNode) RecoverKey(ctx context.Context, keyName, mnemonic string) e
 	return err
 }
 
+func (tn *ChainNode) IsAboveSDK47(ctx context.Context) bool {
+	// In SDK v47, a new genesis core command was added. This spec has many state breaking features
+	// so we use this to switch between new and legacy SDK logic.
+	// https://github.com/cosmos/cosmos-sdk/pull/14149
+	return tn.HasCommand(ctx, "genesis")
+}
+
 // AddGenesisAccount adds a genesis account for each key
-func (tn *ChainNode) AddGenesisAccount(ctx context.Context, address string, genesisAmount []types.Coin) error {
+func (tn *ChainNode) AddGenesisAccount(ctx context.Context, address string, genesisAmount []sdk.Coin) error {
 	amount := ""
 	for i, coin := range genesisAmount {
 		if i != 0 {
 			amount += ","
 		}
-		amount += fmt.Sprintf("%d%s", coin.Amount.Int64(), coin.Denom)
+		amount += fmt.Sprintf("%s%s", coin.Amount.String(), coin.Denom)
 	}
 
 	tn.lock.Lock()
@@ -615,27 +693,32 @@ func (tn *ChainNode) AddGenesisAccount(ctx context.Context, address string, gene
 	defer cancel()
 
 	var command []string
-	if tn.Chain.Config().UsingNewGenesisCommand {
+	if tn.IsAboveSDK47(ctx) {
 		command = append(command, "genesis")
 	}
 
 	command = append(command, "add-genesis-account", address, amount)
+
+	if tn.Chain.Config().UsingChainIDFlagCLI {
+		command = append(command, "--chain-id", tn.Chain.Config().ChainID)
+	}
+
 	_, _, err := tn.ExecBin(ctx, command...)
 
 	return err
 }
 
 // Gentx generates the gentx for a given node
-func (tn *ChainNode) Gentx(ctx context.Context, name string, genesisSelfDelegation types.Coin) error {
+func (tn *ChainNode) Gentx(ctx context.Context, name string, genesisSelfDelegation sdk.Coin) error {
 	tn.lock.Lock()
 	defer tn.lock.Unlock()
 
 	var command []string
-	if tn.Chain.Config().UsingNewGenesisCommand {
+	if tn.IsAboveSDK47(ctx) {
 		command = append(command, "genesis")
 	}
 
-	command = append(command, "gentx", valKey, fmt.Sprintf("%d%s", genesisSelfDelegation.Amount.Int64(), genesisSelfDelegation.Denom),
+	command = append(command, "gentx", valKey, fmt.Sprintf("%s%s", genesisSelfDelegation.Amount.String(), genesisSelfDelegation.Denom),
 		"--keyring-backend", keyring.BackendTest,
 		"--chain-id", tn.Chain.Config().ChainID)
 
@@ -646,7 +729,7 @@ func (tn *ChainNode) Gentx(ctx context.Context, name string, genesisSelfDelegati
 // CollectGentxs runs collect gentxs on the node's home folders
 func (tn *ChainNode) CollectGentxs(ctx context.Context) error {
 	command := []string{tn.Chain.Config().Bin}
-	if tn.Chain.Config().UsingNewGenesisCommand {
+	if tn.IsAboveSDK47(ctx) {
 		command = append(command, "genesis")
 	}
 
@@ -674,7 +757,8 @@ func (tn *ChainNode) SendIBCTransfer(
 ) (string, error) {
 	command := []string{
 		"ibc-transfer", "transfer", "transfer", channelID,
-		amount.Address, fmt.Sprintf("%d%s", amount.Amount, amount.Denom),
+		amount.Address, fmt.Sprintf("%s%s", amount.Amount.String(), amount.Denom),
+		"--gas", "auto",
 	}
 	if options.Timeout != nil {
 		if options.Timeout.NanoSeconds > 0 {
@@ -689,74 +773,9 @@ func (tn *ChainNode) SendIBCTransfer(
 	return tn.ExecTx(ctx, keyName, command...)
 }
 
-func (tn *ChainNode) SendFunds(ctx context.Context, keyName string, amount ibc.WalletAmount) error {
-	_, err := tn.ExecTx(ctx,
-		keyName, "bank", "send", keyName,
-		amount.Address, fmt.Sprintf("%d%s", amount.Amount, amount.Denom),
-	)
-	return err
-}
-
-type InstantiateContractAttribute struct {
-	Value string `json:"value"`
-}
-
-type InstantiateContractEvent struct {
-	Attributes []InstantiateContractAttribute `json:"attributes"`
-}
-
-type InstantiateContractLog struct {
-	Events []InstantiateContractEvent `json:"event"`
-}
-
-type InstantiateContractResponse struct {
-	Logs []InstantiateContractLog `json:"log"`
-}
-
-type QueryContractResponse struct {
-	Contracts []string `json:"contracts"`
-}
-
-type CodeInfo struct {
-	CodeID string `json:"code_id"`
-}
-type CodeInfosResponse struct {
-	CodeInfos []CodeInfo `json:"code_infos"`
-}
-
-// StoreContract takes a file path to smart contract and stores it on-chain. Returns the contracts code id.
-func (tn *ChainNode) StoreContract(ctx context.Context, keyName string, fileName string) (string, error) {
-	_, file := filepath.Split(fileName)
-	err := tn.CopyFile(ctx, fileName, file)
-	if err != nil {
-		return "", fmt.Errorf("writing contract file to docker volume: %w", err)
-	}
-
-	if _, err := tn.ExecTx(ctx, keyName, "wasm", "store", path.Join(tn.HomeDir(), file), "--gas", "auto"); err != nil {
-		return "", err
-	}
-
-	err = testutil.WaitForBlocks(ctx, 5, tn.Chain)
-	if err != nil {
-		return "", fmt.Errorf("wait for blocks: %w", err)
-	}
-
-	stdout, _, err := tn.ExecQuery(ctx, "wasm", "list-code", "--reverse")
-	if err != nil {
-		return "", err
-	}
-
-	res := CodeInfosResponse{}
-	if err := json.Unmarshal([]byte(stdout), &res); err != nil {
-		return "", err
-	}
-
-	return res.CodeInfos[0].CodeID, nil
-}
-
-func (tn *ChainNode) getTransaction(clientCtx client.Context, txHash string) (*types.TxResponse, error) {
+func (tn *ChainNode) GetTransaction(clientCtx client.Context, txHash string) (*sdk.TxResponse, error) {
 	// Retry because sometimes the tx is not committed to state yet.
-	var txResp *types.TxResponse
+	var txResp *sdk.TxResponse
 	err := retry.Do(func() error {
 		var err error
 		txResp, err = authTx.QueryTx(clientCtx, txHash)
@@ -771,83 +790,99 @@ func (tn *ChainNode) getTransaction(clientCtx client.Context, txHash string) (*t
 	return txResp, err
 }
 
-// InstantiateContract takes a code id for a smart contract and initialization message and returns the instantiated contract address.
-func (tn *ChainNode) InstantiateContract(ctx context.Context, keyName string, codeID string, initMessage string, needsNoAdminFlag bool, extraExecTxArgs ...string) (string, error) {
-	command := []string{"wasm", "instantiate", codeID, initMessage, "--label", "wasm-contract"}
-	command = append(command, extraExecTxArgs...)
-	if needsNoAdminFlag {
-		command = append(command, "--no-admin")
-	}
-	txHash, err := tn.ExecTx(ctx, keyName, command...)
-	if err != nil {
-		return "", err
+// HasCommand checks if a command in the chain binary is available.
+func (tn *ChainNode) HasCommand(ctx context.Context, command ...string) bool {
+	_, _, err := tn.ExecBin(ctx, command...)
+	if err == nil {
+		return true
 	}
 
-	txResp, err := tn.getTransaction(tn.CliContext(), txHash)
-	if err != nil {
-		return "", fmt.Errorf("failed to get transaction %s: %w", txHash, err)
-	}
-	if txResp.Code != 0 {
-		return "", fmt.Errorf("error in transaction (code: %d): %s", txResp.Code, txResp.RawLog)
+	if strings.Contains(string(err.Error()), "Error: unknown command") {
+		return false
 	}
 
-	stdout, _, err := tn.ExecQuery(ctx, "wasm", "list-contract-by-code", codeID)
-	if err != nil {
-		return "", err
+	// cmd just needed more arguments, but it is a valid command (ex: appd tx bank send)
+	if strings.Contains(string(err.Error()), "Error: accepts") {
+		return true
 	}
 
-	contactsRes := QueryContractResponse{}
-	if err := json.Unmarshal([]byte(stdout), &contactsRes); err != nil {
-		return "", err
-	}
-
-	contractAddress := contactsRes.Contracts[len(contactsRes.Contracts)-1]
-	return contractAddress, nil
+	return false
 }
 
-// ExecuteContract executes a contract transaction with a message using it's address.
-func (tn *ChainNode) ExecuteContract(ctx context.Context, keyName string, contractAddress string, message string) (txHash string, err error) {
-	return tn.ExecTx(ctx, keyName,
-		"wasm", "execute", contractAddress, message,
-	)
-}
-
-// QueryContract performs a smart query, taking in a query struct and returning a error with the response struct populated.
-func (tn *ChainNode) QueryContract(ctx context.Context, contractAddress string, queryMsg any, response any) error {
-	query, err := json.Marshal(queryMsg)
+// GetBuildInformation returns the build information and dependencies for the chain binary.
+func (tn *ChainNode) GetBuildInformation(ctx context.Context) *BinaryBuildInformation {
+	stdout, _, err := tn.ExecBin(ctx, "version", "--long", "--output", "json")
 	if err != nil {
-		return err
-	}
-	stdout, _, err := tn.ExecQuery(ctx, "wasm", "contract-state", "smart", contractAddress, string(query))
-	if err != nil {
-		return err
-	}
-	err = json.Unmarshal([]byte(stdout), response)
-	return err
-}
-
-// StoreClientContract takes a file path to a client smart contract and stores it on-chain. Returns the contracts code id.
-func (tn *ChainNode) StoreClientContract(ctx context.Context, keyName string, fileName string) (string, error) {
-	content, err := os.ReadFile(fileName)
-	if err != nil {
-		return "", err
-	}
-	_, file := filepath.Split(fileName)
-	err = tn.WriteFile(ctx, content, file)
-	if err != nil {
-		return "", fmt.Errorf("writing contract file to docker volume: %w", err)
+		return nil
 	}
 
-	_, err = tn.ExecTx(ctx, keyName, "ibc-wasm", "store-code", path.Join(tn.HomeDir(), file), "--gas", "auto")
-	if err != nil {
-		return "", err
+	type tempBuildDeps struct {
+		Name             string   `json:"name"`
+		ServerName       string   `json:"server_name"`
+		Version          string   `json:"version"`
+		Commit           string   `json:"commit"`
+		BuildTags        string   `json:"build_tags"`
+		Go               string   `json:"go"`
+		BuildDeps        []string `json:"build_deps"`
+		CosmosSdkVersion string   `json:"cosmos_sdk_version"`
 	}
 
-	codeHashByte32 := sha256.Sum256(content)
-	codeHash := hex.EncodeToString(codeHashByte32[:])
+	var deps tempBuildDeps
+	if err := json.Unmarshal([]byte(stdout), &deps); err != nil {
+		return nil
+	}
 
-	//return stdout, nil
-	return codeHash, nil
+	getRepoAndVersion := func(dep string) (string, string) {
+		split := strings.Split(dep, "@")
+		return split[0], split[1]
+	}
+
+	var buildDeps []BuildDependency
+	for _, dep := range deps.BuildDeps {
+		var bd BuildDependency
+
+		if strings.Contains(dep, "=>") {
+			// Ex: "github.com/aaa/bbb@v1.2.1 => github.com/ccc/bbb@v1.2.0"
+			split := strings.Split(dep, " => ")
+			main, replacement := split[0], split[1]
+
+			parent, parentVersion := getRepoAndVersion(main)
+			r, rV := getRepoAndVersion(replacement)
+
+			bd = BuildDependency{
+				Parent:             parent,
+				Version:            parentVersion,
+				IsReplacement:      true,
+				Replacement:        r,
+				ReplacementVersion: rV,
+			}
+
+		} else {
+			// Ex: "github.com/aaa/bbb@v0.0.0-20191008050251-8e49817e8af4"
+			parent, version := getRepoAndVersion(dep)
+
+			bd = BuildDependency{
+				Parent:             parent,
+				Version:            version,
+				IsReplacement:      false,
+				Replacement:        "",
+				ReplacementVersion: "",
+			}
+		}
+
+		buildDeps = append(buildDeps, bd)
+	}
+
+	return &BinaryBuildInformation{
+		BuildDeps:        buildDeps,
+		Name:             deps.Name,
+		ServerName:       deps.ServerName,
+		Version:          deps.Version,
+		Commit:           deps.Commit,
+		BuildTags:        deps.BuildTags,
+		Go:               deps.Go,
+		CosmosSdkVersion: deps.CosmosSdkVersion,
+	}
 }
 
 // QueryClientContractCode performs a query with the contract codeHash as the input and code as the output
@@ -994,31 +1029,48 @@ func (tn *ChainNode) QueryParam(ctx context.Context, subspace, key string) (*Par
 	return &param, nil
 }
 
-// DumpContractState dumps the state of a contract at a block height.
-func (tn *ChainNode) DumpContractState(ctx context.Context, contractAddress string, height int64) (*DumpContractStateResponse, error) {
-	stdout, _, err := tn.ExecQuery(ctx,
-		"wasm", "contract-state", "all", contractAddress,
-		"--height", fmt.Sprint(height),
-	)
+// QueryBankMetadata returns the bank metadata of a token denomination.
+func (tn *ChainNode) QueryBankMetadata(ctx context.Context, denom string) (*BankMetaData, error) {
+	stdout, _, err := tn.ExecQuery(ctx, "bank", "denom-metadata", "--denom", denom)
 	if err != nil {
 		return nil, err
 	}
-
-	res := new(DumpContractStateResponse)
-	if err := json.Unmarshal([]byte(stdout), res); err != nil {
+	var meta BankMetaData
+	err = json.Unmarshal(stdout, &meta)
+	if err != nil {
 		return nil, err
 	}
-	return res, nil
+	return &meta, nil
 }
 
 func (tn *ChainNode) ExportState(ctx context.Context, height int64) (string, error) {
 	tn.lock.Lock()
 	defer tn.lock.Unlock()
 
-	stdout, stderr, err := tn.ExecBin(ctx, "export", "--height", fmt.Sprint(height))
+	var (
+		doc              = "state_export.json"
+		docPath          = path.Join(tn.HomeDir(), doc)
+		isNewerThanSdk47 = tn.IsAboveSDK47(ctx)
+		command          = []string{"export", "--height", fmt.Sprint(height), "--home", tn.HomeDir()}
+	)
+
+	if isNewerThanSdk47 {
+		command = append(command, "--output-document", docPath)
+	}
+
+	stdout, stderr, err := tn.ExecBin(ctx, command...)
 	if err != nil {
 		return "", err
 	}
+
+	if isNewerThanSdk47 {
+		content, err := tn.ReadFile(ctx, doc)
+		if err != nil {
+			return "", err
+		}
+		return string(content), nil
+	}
+
 	// output comes to stderr on older versions
 	return string(stdout) + string(stderr), nil
 }
@@ -1027,7 +1079,14 @@ func (tn *ChainNode) UnsafeResetAll(ctx context.Context) error {
 	tn.lock.Lock()
 	defer tn.lock.Unlock()
 
-	_, _, err := tn.ExecBin(ctx, "unsafe-reset-all")
+	command := []string{tn.Chain.Config().Bin}
+	if tn.IsAboveSDK47(ctx) {
+		command = append(command, "comet")
+	}
+
+	command = append(command, "unsafe-reset-all", "--home", tn.HomeDir())
+
+	_, _, err := tn.Exec(ctx, command, nil)
 	return err
 }
 
@@ -1036,25 +1095,63 @@ func (tn *ChainNode) CreateNodeContainer(ctx context.Context) error {
 
 	var cmd []string
 	if chainCfg.NoHostMount {
-		cmd = []string{"sh", "-c", fmt.Sprintf("cp -r %s %s_nomnt && %s start --home %s_nomnt --x-crisis-skip-assert-invariants", tn.HomeDir(), tn.HomeDir(), chainCfg.Bin, tn.HomeDir())}
+		startCmd := fmt.Sprintf("cp -r %s %s_nomnt && %s start --home %s_nomnt --x-crisis-skip-assert-invariants", tn.HomeDir(), tn.HomeDir(), chainCfg.Bin, tn.HomeDir())
+		if len(chainCfg.AdditionalStartArgs) > 0 {
+			startCmd = fmt.Sprintf("%s %s", startCmd, chainCfg.AdditionalStartArgs)
+		}
+		cmd = []string{"sh", "-c", startCmd}
 	} else {
 		cmd = []string{chainCfg.Bin, "start", "--home", tn.HomeDir(), "--x-crisis-skip-assert-invariants"}
+		if len(chainCfg.AdditionalStartArgs) > 0 {
+			cmd = append(cmd, chainCfg.AdditionalStartArgs...)
+		}
 	}
 
-	return tn.containerLifecycle.CreateContainer(ctx, tn.TestName, tn.NetworkID, tn.Image, sentryPorts, tn.Bind(), tn.HostName(), cmd)
+	usingPorts := nat.PortMap{}
+	for k, v := range sentryPorts {
+		usingPorts[k] = v
+	}
+
+	if tn.Index == 0 && chainCfg.HostPortOverride != nil {
+		for intP, extP := range chainCfg.HostPortOverride {
+			usingPorts[nat.Port(fmt.Sprintf("%d/tcp", intP))] = []nat.PortBinding{
+				{
+					HostPort: fmt.Sprintf("%d", extP),
+				},
+			}
+		}
+
+		fmt.Printf("Port Overrides: %v. Using: %v\n", chainCfg.HostPortOverride, usingPorts)
+	}
+
+	return tn.containerLifecycle.CreateContainer(ctx, tn.TestName, tn.NetworkID, tn.Image, usingPorts, tn.Bind(), nil, tn.HostName(), cmd, chainCfg.Env)
 }
 
 func (tn *ChainNode) StartContainer(ctx context.Context) error {
+	for _, s := range tn.Sidecars {
+		err := s.containerLifecycle.Running(ctx)
+
+		if s.preStart && err != nil {
+			if err := s.CreateContainer(ctx); err != nil {
+				return err
+			}
+
+			if err := s.StartContainer(ctx); err != nil {
+				return err
+			}
+		}
+	}
+
 	if err := tn.containerLifecycle.StartContainer(ctx); err != nil {
 		return err
 	}
 
 	// Set the host ports once since they will not change after the container has started.
-	hostPorts, err := tn.containerLifecycle.GetHostPorts(ctx, rpcPort, grpcPort)
+	hostPorts, err := tn.containerLifecycle.GetHostPorts(ctx, rpcPort, grpcPort, apiPort, p2pPort)
 	if err != nil {
 		return err
 	}
-	tn.hostRPCPort, tn.hostGRPCPort = hostPorts[0], hostPorts[1]
+	tn.hostRPCPort, tn.hostGRPCPort, tn.hostAPIPort, tn.hostP2PPort = hostPorts[0], hostPorts[1], hostPorts[2], hostPorts[3]
 
 	err = tn.NewClient("tcp://" + tn.hostRPCPort)
 	if err != nil {
@@ -1076,11 +1173,39 @@ func (tn *ChainNode) StartContainer(ctx context.Context) error {
 	}, retry.Context(ctx), retry.Attempts(40), retry.Delay(3*time.Second), retry.DelayType(retry.FixedDelay))
 }
 
+func (tn *ChainNode) PauseContainer(ctx context.Context) error {
+	for _, s := range tn.Sidecars {
+		if err := s.PauseContainer(ctx); err != nil {
+			return err
+		}
+	}
+	return tn.containerLifecycle.PauseContainer(ctx)
+}
+
+func (tn *ChainNode) UnpauseContainer(ctx context.Context) error {
+	for _, s := range tn.Sidecars {
+		if err := s.UnpauseContainer(ctx); err != nil {
+			return err
+		}
+	}
+	return tn.containerLifecycle.UnpauseContainer(ctx)
+}
+
 func (tn *ChainNode) StopContainer(ctx context.Context) error {
+	for _, s := range tn.Sidecars {
+		if err := s.StopContainer(ctx); err != nil {
+			return err
+		}
+	}
 	return tn.containerLifecycle.StopContainer(ctx)
 }
 
 func (tn *ChainNode) RemoveContainer(ctx context.Context) error {
+	for _, s := range tn.Sidecars {
+		if err := s.RemoveContainer(ctx); err != nil {
+			return err
+		}
+	}
 	return tn.containerLifecycle.RemoveContainer(ctx)
 }
 
@@ -1088,8 +1213,8 @@ func (tn *ChainNode) RemoveContainer(ctx context.Context) error {
 func (tn *ChainNode) InitValidatorGenTx(
 	ctx context.Context,
 	chainType *ibc.ChainConfig,
-	genesisAmounts []types.Coin,
-	genesisSelfDelegation types.Coin,
+	genesisAmounts []sdk.Coin,
+	genesisSelfDelegation sdk.Coin,
 ) error {
 	if err := tn.CreateKey(ctx, valKey); err != nil {
 		return err
@@ -1251,7 +1376,7 @@ func (tn *ChainNode) SendICABankTransfer(ctx context.Context, connectionID, from
 		"amount": []map[string]any{
 			{
 				"denom":  amount.Denom,
-				"amount": amount.Amount,
+				"amount": amount.Amount.String(),
 			},
 		},
 	})

@@ -1,16 +1,18 @@
 package cosmos_test
 
 import (
-	"context"
 	"encoding/json"
+	"strconv"
 	"testing"
 
+	"cosmossdk.io/math"
 	paramsutils "github.com/cosmos/cosmos-sdk/x/params/client/utils"
-	"github.com/strangelove-ventures/interchaintest/v7"
-	"github.com/strangelove-ventures/interchaintest/v7/chain/cosmos"
-	"github.com/strangelove-ventures/interchaintest/v7/ibc"
+	"github.com/strangelove-ventures/interchaintest/v8"
+	"github.com/strangelove-ventures/interchaintest/v8/chain/cosmos"
+	"github.com/strangelove-ventures/interchaintest/v8/ibc"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap/zaptest"
+
+	govv1beta1 "github.com/cosmos/cosmos-sdk/x/gov/types/v1beta1"
 )
 
 func TestJunoParamChange(t *testing.T) {
@@ -29,56 +31,23 @@ func CosmosChainParamChangeTest(t *testing.T, name, version string) {
 
 	// SDK v45 params for Juno genesis
 	shortVoteGenesis := []cosmos.GenesisKV{
-		{
-			Key:   "app_state.gov.voting_params.voting_period",
-			Value: votingPeriod,
-		},
-		{
-			Key:   "app_state.gov.deposit_params.max_deposit_period",
-			Value: maxDepositPeriod,
-		},
-		{
-			Key:   "app_state.gov.deposit_params.min_deposit.0.denom",
-			Value: "ujuno",
-		},
+		cosmos.NewGenesisKV("app_state.gov.voting_params.voting_period", votingPeriod),
+		cosmos.NewGenesisKV("app_state.gov.deposit_params.max_deposit_period", maxDepositPeriod),
+		cosmos.NewGenesisKV("app_state.gov.deposit_params.min_deposit.0.denom", "ujuno"),
 	}
 
-	cf := interchaintest.NewBuiltinChainFactory(zaptest.NewLogger(t), []*interchaintest.ChainSpec{
-		{
-			Name:      name,
-			ChainName: name,
-			Version:   version,
-			ChainConfig: ibc.ChainConfig{
-				Denom:         "ujuno",
-				ModifyGenesis: cosmos.ModifyGenesis(shortVoteGenesis),
-			},
-			NumValidators: &numVals,
-			NumFullNodes:  &numFullNodes,
-		},
-	})
+	cfg := ibc.ChainConfig{
+		Denom:         "ujuno",
+		ModifyGenesis: cosmos.ModifyGenesis(shortVoteGenesis),
+	}
 
-	chains, err := cf.Chains(t.Name())
-	require.NoError(t, err)
-
+	chains := interchaintest.CreateChainWithConfig(t, numVals, numFullNodes, name, version, cfg)
 	chain := chains[0].(*cosmos.CosmosChain)
 
-	ic := interchaintest.NewInterchain().
-		AddChain(chain)
+	enableBlockDB := false
+	ctx, _, _, _ := interchaintest.BuildInitialChain(t, chains, enableBlockDB)
 
-	ctx := context.Background()
-	client, network := interchaintest.DockerSetup(t)
-
-	require.NoError(t, ic.Build(ctx, nil, interchaintest.InterchainBuildOptions{
-		TestName:         t.Name(),
-		Client:           client,
-		NetworkID:        network,
-		SkipPathCreation: true,
-	}))
-	t.Cleanup(func() {
-		_ = ic.Close()
-	})
-
-	const userFunds = int64(10_000_000_000)
+	var userFunds = math.NewInt(10_000_000_000)
 	users := interchaintest.GetAndFundTestUsers(t, ctx, t.Name(), userFunds, chain)
 	chainUser := users[0]
 
@@ -109,7 +78,11 @@ func CosmosChainParamChangeTest(t *testing.T, name, version string) {
 	require.NoError(t, err, "failed to submit votes")
 
 	height, _ := chain.Height(ctx)
-	_, err = cosmos.PollForProposalStatus(ctx, chain, height, height+10, paramTx.ProposalID, cosmos.ProposalStatusPassed)
+
+	propId, err := strconv.ParseUint(paramTx.ProposalID, 10, 64)
+	require.NoError(t, err, "failed to convert proposal ID to uint64")
+
+	_, err = cosmos.PollForProposalStatus(ctx, chain, height, height+10, propId, govv1beta1.StatusPassed)
 	require.NoError(t, err, "proposal status did not change to passed in expected number of blocks")
 
 	param, _ = chain.QueryParam(ctx, "staking", "MaxValidators")
