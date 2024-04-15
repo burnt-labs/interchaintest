@@ -456,6 +456,16 @@ func (c *CosmosChain) ParamChangeProposal(ctx context.Context, keyName string, p
 	return c.txProposal(txHash)
 }
 
+// LegacyParamChangeProposal submits a param change proposal to the chain, signed by keyName.
+func (c *CosmosChain) LegacyParamChangeProposal(ctx context.Context, keyName string, prop *paramsutils.ParamChangeProposalJSON) (tx TxProposal, _ error) {
+	txHash, err := c.getFullNode().LegacyParamChangeProposal(ctx, keyName, prop)
+	if err != nil {
+		return tx, fmt.Errorf("failed to submit legacy param change proposal: %w", err)
+	}
+
+	return c.txProposal(txHash)
+}
+
 // QueryParam returns the param state of a given key.
 func (c *CosmosChain) QueryParam(ctx context.Context, subspace, key string) (*ParamChange, error) {
 	return c.getFullNode().QueryParam(ctx, subspace, key)
