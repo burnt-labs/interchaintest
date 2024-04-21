@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/cosmos/go-bip39"
 	"hash/fnv"
 	"os"
 	"path"
@@ -50,6 +51,7 @@ type ChainNode struct {
 	Client       rpcclient.Client
 	TestName     string
 	Image        ibc.DockerImage
+	Mnemonic     string
 
 	lock sync.Mutex
 	log  *zap.Logger
@@ -1109,7 +1111,6 @@ func (tn *ChainNode) RemoveContainer(ctx context.Context) error {
 	return tn.containerLifecycle.RemoveContainer(ctx)
 }
 
-// InitValidatorFiles creates the node files and signs a genesis transaction
 func (tn *ChainNode) InitValidatorGenTx(
 	ctx context.Context,
 	chainType *ibc.ChainConfig,
@@ -1117,6 +1118,35 @@ func (tn *ChainNode) InitValidatorGenTx(
 	genesisSelfDelegation types.Coin,
 ) error {
 	if err := tn.CreateKey(ctx, valKey); err != nil {
+		return err
+	}
+	bech32, err := tn.AccountKeyBech32(ctx, valKey)
+	if err != nil {
+		return err
+	}
+	if err := tn.AddGenesisAccount(ctx, bech32, genesisAmounts); err != nil {
+		return err
+	}
+	return tn.Gentx(ctx, valKey, genesisSelfDelegation)
+}
+
+func (tn *ChainNode) InitValidatorGenTxFromMnemonic(
+	ctx context.Context,
+	chainType *ibc.ChainConfig,
+	genesisAmounts []types.Coin,
+	genesisSelfDelegation types.Coin,
+) error {
+	var entropySeed []byte
+	entropySeed, err := bip39.NewEntropy(256)
+	if err != nil {
+		return err
+	}
+	mnemonic, err := bip39.NewMnemonic(entropySeed)
+	if err != nil {
+		return err
+	}
+	tn.Mnemonic = mnemonic
+	if err := tn.RecoverKey(ctx, valKey, tn.Mnemonic); err != nil {
 		return err
 	}
 	bech32, err := tn.AccountKeyBech32(ctx, valKey)

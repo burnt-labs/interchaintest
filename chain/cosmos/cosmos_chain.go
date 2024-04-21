@@ -772,7 +772,7 @@ func (c *CosmosChain) Start(testName string, ctx context.Context, additionalGene
 				}
 			}
 			if !c.cfg.SkipGenTx {
-				return v.InitValidatorGenTx(ctx, &chainCfg, genesisAmounts, genesisSelfDelegation)
+				return v.InitValidatorGenTxFromMnemonic(ctx, &chainCfg, genesisAmounts, genesisSelfDelegation)
 			}
 			return nil
 		})
