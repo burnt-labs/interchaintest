@@ -46,6 +46,8 @@ type ChainConfig struct {
 	EncodingConfig *testutil.TestEncodingConfig
 	// Required when the chain uses the new sub commands for genesis (https://github.com/cosmos/cosmos-sdk/pull/14149)
 	UsingNewGenesisCommand bool `yaml:"using-new-genesis-command"`
+	// Whether to persist Validator mnemonics for use during a test
+	KeepValidatorMnemonic bool `yaml:"keep-validator-mnemonic"`
 }
 
 func (c ChainConfig) Clone() ChainConfig {
@@ -144,6 +146,10 @@ func (c ChainConfig) MergeChainSpecConfig(other ChainConfig) ChainConfig {
 
 	if other.EncodingConfig != nil {
 		c.EncodingConfig = other.EncodingConfig
+	}
+
+	if other.KeepValidatorMnemonic {
+		c.KeepValidatorMnemonic = true
 	}
 
 	return c
